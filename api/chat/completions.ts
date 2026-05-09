@@ -38,7 +38,6 @@ export default async function handler(req: Request) {
       try {
         const parsed = JSON.parse(body);
         clientWantsStream = parsed.stream === true;
-        // Force streaming from upstream for keep-alive benefits
         parsed.stream = true;
         // Only force high reasoning if no tools are specified (tools + reasoning requires thought signatures)
         if (!parsed.tools || parsed.tools.length === 0) {
@@ -84,7 +83,7 @@ export default async function handler(req: Request) {
       }
 
       if (clientWantsStream) {
-        return relayStreamWithHeartbeat(response);
+        return relayStreamWithThoughtTransform(response);
       } else {
         return await bufferStreamToJson(response);
       }
@@ -105,11 +104,15 @@ export default async function handler(req: Request) {
   });
 }
 
-function relayStreamWithHeartbeat(upstream: Response): Response {
+// Streaming path for thought transformation
+function relayStreamWithThoughtTransform(upstream: Response): Response {
   const reader = upstream.body!.getReader();
   const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
   let heartbeatId: ReturnType<typeof setInterval>;
   let firstChunkReceived = false;
+  let sseBuffer = '';
+  let hadToolCalls = false;
 
   const stream = new ReadableStream({
     start(controller) {
@@ -126,7 +129,119 @@ function relayStreamWithHeartbeat(upstream: Response): Response {
             const { done, value } = await reader.read();
             if (done) break;
             firstChunkReceived = true;
-            controller.enqueue(value);
+
+            sseBuffer += decoder.decode(value, { stream: true });
+            const lines = sseBuffer.split('\n');
+            sseBuffer = lines.pop() ?? '';
+
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) {
+                if (line.startsWith(':') || line === '') {
+                  controller.enqueue(encoder.encode(line + '\n'));
+                }
+                continue;
+              }
+
+              if (line === 'data: [DONE]') {
+                controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+                continue;
+              }
+
+              let chunk: any;
+              try {
+                chunk = JSON.parse(line.slice(6));
+              } catch {
+                controller.enqueue(encoder.encode(line + '\n\n'));
+                continue;
+              }
+
+              const choice = chunk.choices?.[0];
+              const delta = choice?.delta;
+
+              if (!delta) {
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+                continue;
+              }
+
+              // Detect reasoning content via new native field OR legacy flag
+              const hasReasoning = delta.reasoning_content !== undefined && delta.reasoning_content !== null;
+              const legacyThought = delta.extra_content?.google?.thought === true;
+              const isThought = hasReasoning || legacyThought;
+
+              // Tool calls - always emit first, ignoring any text/reasoning on same chunk
+              const hasToolCalls = Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0;
+              if (hasToolCalls) {
+                hadToolCalls = true;
+                // Filter tool calls to ensure they have valid structure (avoid thought signature errors)
+                const validToolCalls = delta.tool_calls.filter((tc: any) => {
+                  if (!tc.function?.name || !tc.id) return false;
+                  return true;
+                });
+                const toolChunk = {
+                  ...chunk,
+                  choices: [{
+                    ...choice,
+                    delta: {
+                      role: 'assistant',
+                      content: null,
+                      tool_calls: validToolCalls,
+                    },
+                    finish_reason: 'tool_calls',
+                  }],
+                };
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(toolChunk)}\n\n`));
+                continue;
+              }
+
+              // Reasoning token
+              if (isThought) {
+                const reasoningText = delta.reasoning_content ?? delta.content ?? '';
+                const reasoningChunk = {
+                  ...chunk,
+                  choices: [{
+                    ...choice,
+                    delta: {
+                      role: 'assistant',
+                      reasoning_content: reasoningText,
+                      content: null,
+                    },
+                  }],
+                };
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(reasoningChunk)}\n\n`));
+                continue;
+              }
+
+              // Regular text content
+              const rawContent = delta.content ?? '';
+              if (rawContent) {
+                const contentChunk = {
+                  ...chunk,
+                  choices: [{
+                    ...choice,
+                    delta: {
+                      role: 'assistant',
+                      content: rawContent,
+                    },
+                  }],
+                };
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(contentChunk)}\n\n`));
+                continue;
+              }
+
+              // Metadata chunk
+              if (hadToolCalls && choice?.finish_reason === 'stop') {
+                const fixedChunk = {
+                  ...chunk,
+                  choices: [{
+                    ...choice,
+                    finish_reason: 'tool_calls',
+                  }],
+                };
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(fixedChunk)}\n\n`));
+              } else {
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+              }
+            }
           }
         } catch (err) {
           console.error('[STREAM ERROR]', err);
@@ -153,59 +268,52 @@ function relayStreamWithHeartbeat(upstream: Response): Response {
   });
 }
 
+// Non-streaming (buffered) path
 async function bufferStreamToJson(upstream: Response): Promise<Response> {
   const reader = upstream.body!.getReader();
   const decoder = new TextDecoder();
-
   const sseChunks: string[] = [];
   let firstChunkReceived = false;
-
-  // Start a heartbeat that writes to a dummy writer
-  // The real purpose is to keep the Vercel function alive by doing periodic work
   let heartbeatId: ReturnType<typeof setInterval>;
-  const heartbeatPromise = new Promise<void>((resolve) => {
-    heartbeatId = setInterval(() => {
-      if (!firstChunkReceived) {
-        // Just logging to keep the function event loop active
-        console.log('[HEARTBEAT] keep-alive tick');
-      }
-    }, HEARTBEAT_INTERVAL_MS);
-  });
+
+  heartbeatId = setInterval(() => {
+    if (!firstChunkReceived) {
+      console.log('[HEARTBEAT] keep-alive tick');
+    }
+  }, HEARTBEAT_INTERVAL_MS);
 
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       firstChunkReceived = true;
-      const text = decoder.decode(value, { stream: true });
-      sseChunks.push(text);
+      sseChunks.push(decoder.decode(value, { stream: true }));
     }
   } catch (err) {
     console.error('[BUFFER ERROR]', err);
   } finally {
-    clearInterval(heartbeatId!);
+    clearInterval(heartbeatId);
   }
 
-  const fullText = sseChunks.join('');
-  const assembled = reassembleSseToJson(fullText);
+  const assembled = reassembleSseToJson(sseChunks.join(''));
 
   return new Response(JSON.stringify(assembled), {
     status: 200,
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
   });
 }
 
 function reassembleSseToJson(sseText: string): any {
   const lines = sseText.split('\n');
+  let reasoningContent = '';
   let content = '';
   let model = '';
   let finishReason = '';
   let promptTokens = 0;
   let completionTokens = 0;
   let id = '';
-  let hasThought = false;
+  const toolCalls: any[] = [];
+  let hadToolCalls = false;
 
   for (const line of lines) {
     if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
@@ -214,65 +322,68 @@ function reassembleSseToJson(sseText: string): any {
       if (chunk.model) model = chunk.model;
       if (chunk.id) id = chunk.id;
 
+      if (chunk.usage) {
+        promptTokens = chunk.usage.prompt_tokens || promptTokens;
+        completionTokens = chunk.usage.completion_tokens || completionTokens;
+      }
+
       const choice = chunk.choices?.[0];
-      if (choice) {
-        if (choice.finish_reason) finishReason = choice.finish_reason;
-        const delta = choice.delta;
-        if (delta) {
-          // Skip thinking chunks
-          if (delta.extra_content?.google?.thought) {
-            hasThought = true;
-            continue;
+      if (!choice) continue;
+
+      if (choice.finish_reason) finishReason = choice.finish_reason;
+
+      const delta = choice.delta;
+      if (!delta) continue;
+
+      // Skip everything if this delta contains tool calls - filter out invalid ones
+      const hasToolCalls = Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0;
+      if (hasToolCalls) {
+        hadToolCalls = true;
+        for (const tc of delta.tool_calls) {
+          if (!tc.function?.name || !tc.id) continue;
+          const idx = tc.index ?? 0;
+          if (!toolCalls[idx]) {
+            toolCalls[idx] = {
+              id: tc.id,
+              type: tc.type ?? 'function',
+              function: { name: tc.function.name, arguments: '' },
+            };
           }
-          // Skip function calls without valid thought signatures (causes Gemini API error)
-          if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
-            const validToolCalls = delta.tool_calls.filter((tc: any) => {
-              // Must have function with name and properly formed id
-              if (!tc.function?.name || !tc.id) return false;
-              return true;
-            });
-            if (validToolCalls.length < delta.tool_calls.length) {
-              console.log('[FILTER] Skipped malformed tool calls without thought signatures');
-            }
-            // Continue to process content even if tool calls were filtered
-          }
-          if (delta.content) content += delta.content;
+          if (tc.function?.arguments) toolCalls[idx].function.arguments += tc.function.arguments;
         }
-        if (chunk.usage) {
-          promptTokens = chunk.usage.prompt_tokens || promptTokens;
-          completionTokens = chunk.usage.completion_tokens || completionTokens;
-        }
+        continue;
+      }
+
+      // Detect reasoning content
+      const hasReasoning = delta.reasoning_content !== undefined && delta.reasoning_content !== null;
+      const legacyThought = delta.extra_content?.google?.thought === true;
+      if (hasReasoning || legacyThought) {
+        reasoningContent += delta.reasoning_content ?? delta.content ?? '';
+      } else if (delta.content) {
+        content += delta.content;
       }
     } catch {}
   }
 
-  // Strip <thought>...</thought> tags and any leftover partial tags
-  content = content.replace(/<thought>[\s\S]*?<\/thought>/g, '');
-  content = content.replace(/<\/thought>/g, '');
-  content = content.replace(/<thought>/g, '');
   content = content.trim();
+  reasoningContent = reasoningContent.trim();
+
+  if (hadToolCalls) finishReason = 'tool_calls';
 
   const message: any = {
     role: 'assistant',
-    content,
+    content: content || null,
   };
 
-  if (hasThought) {
-    message.extra_content = { google: { thought: true } };
-  }
+  if (reasoningContent) message.reasoning_content = reasoningContent;
+  if (toolCalls.length > 0) message.tool_calls = toolCalls;
 
   return {
     id: id || `proxy-${Date.now()}`,
     object: 'chat.completion',
     created: Math.floor(Date.now() / 1000),
     model: model || 'gemma-4-31b-it',
-    choices: [
-      {
-        index: 0,
-        message,
-        finish_reason: finishReason || 'stop',
-      },
-    ],
+    choices: [{ index: 0, message, finish_reason: finishReason || 'stop' }],
     usage: {
       prompt_tokens: promptTokens,
       completion_tokens: completionTokens,
