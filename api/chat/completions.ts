@@ -39,9 +39,13 @@ export default async function handler(req: Request) {
         const parsed = JSON.parse(body);
         clientWantsStream = parsed.stream === true;
         parsed.stream = true;
-        // Only force high reasoning if no tools are specified (tools + reasoning requires thought signatures)
-        if (!parsed.tools || parsed.tools.length === 0) {
+        // Tools + reasoning requires thought signatures from Google API
+        // Disable reasoning entirely when tools are present
+        const hasTools = parsed.tools && parsed.tools.length > 0;
+        if (!hasTools) {
           parsed.reasoning_effort = 'high';
+        } else {
+          delete parsed.reasoning_effort;
         }
         body = JSON.stringify(parsed);
       } catch {}
