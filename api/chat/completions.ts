@@ -40,8 +40,10 @@ export default async function handler(req: Request) {
         clientWantsStream = parsed.stream === true;
         // Force streaming from upstream for keep-alive benefits
         parsed.stream = true;
-        // Always force high reasoning for Gemini models
-        parsed.reasoning_effort = 'high';
+        // Only force high reasoning if no tools are specified (tools + reasoning requires thought signatures)
+        if (!parsed.tools || parsed.tools.length === 0) {
+          parsed.reasoning_effort = 'high';
+        }
         body = JSON.stringify(parsed);
       } catch {}
     }
@@ -217,11 +219,22 @@ function reassembleSseToJson(sseText: string): any {
         if (choice.finish_reason) finishReason = choice.finish_reason;
         const delta = choice.delta;
         if (delta) {
-          // Check if this is a thinking chunk
+          // Skip thinking chunks
           if (delta.extra_content?.google?.thought) {
             hasThought = true;
-            // Skip adding thinking content to the main content
             continue;
+          }
+          // Skip function calls without valid thought signatures (causes Gemini API error)
+          if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
+            const validToolCalls = delta.tool_calls.filter((tc: any) => {
+              // Must have function with name and properly formed id
+              if (!tc.function?.name || !tc.id) return false;
+              return true;
+            });
+            if (validToolCalls.length < delta.tool_calls.length) {
+              console.log('[FILTER] Skipped malformed tool calls without thought signatures');
+            }
+            // Continue to process content even if tool calls were filtered
           }
           if (delta.content) content += delta.content;
         }
