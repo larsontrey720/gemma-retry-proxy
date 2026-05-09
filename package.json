@@ -1,0 +1,17 @@
+{
+  "name": "gemma-proxy",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.1",
+    "hono": "^4.12.16",
+    "node-fetch": "^3.3.2"
+  }
+}
