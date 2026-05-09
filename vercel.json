@@ -1,4 +1,11 @@
 {
+  "framework": {
+    "slug": "other",
+    "toc": {
+      "path": "/",
+      "displayName": "Other"
+    }
+  },
   "rewrites": [
     { "source": "/v1/(.*)", "destination": "/api/$1" },
     { "source": "/(.*)", "destination": "/api/$1" }
