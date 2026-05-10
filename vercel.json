@@ -1,10 +1,6 @@
 {
   "version": 2,
-  "functions": {
-    "api/chat/completions.ts": {
-      "runtime": "edge"
-    }
-  },
+  "outputDirectory": null,
   "routes": [
     { "src": "/v1/(.*)", "dest": "/api/chat/completions" },
     { "src": "/(.*)", "dest": "/api/chat/completions" }
