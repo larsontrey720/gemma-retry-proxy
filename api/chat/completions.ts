@@ -1,11 +1,18 @@
-// Utility: Strip <thought>...</thought> tags from content
+// Utility: Decode HTML entities and strip <thought>...</thought> tags from content
 function stripThoughtTags(text: string): string {
   if (!text) return text;
-  return text
-    .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
-    .replace(/<\/?thought>/gi, '')
+  // Decode HTML entities first
+  let decoded = text
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+  // Strip thought tags (both decoded and original HTML entities covered)
+  decoded = decoded
+    .replace(/<thought>[\s\S]*?<\/thought>/gi, ' ')
+    .replace(/<\/?thought>/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+  return decoded;
 }
 
 export const config = {
