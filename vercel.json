@@ -1,8 +1,3 @@
 {
-  "version": 2,
-  "outputDirectory": null,
-  "routes": [
-    { "src": "/v1/(.*)", "dest": "/api/chat/completions" },
-    { "src": "/(.*)", "dest": "/api/chat/completions" }
-  ]
+  "version": 2
 }
