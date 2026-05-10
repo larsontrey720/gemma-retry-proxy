@@ -1,8 +1,5 @@
 {
   "version": 2,
-  "builds": [
-    { "src": "api/chat/completions.ts", "use": "@vercel/functions" }
-  ],
   "routes": [
     { "src": "/v1/(.*)", "dest": "/api/chat/completions" },
     { "src": "/(.*)", "dest": "/api/chat/completions" }
