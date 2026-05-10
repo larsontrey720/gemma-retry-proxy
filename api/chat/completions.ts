@@ -1,3 +1,13 @@
+// Utility: Strip <thought>...</thought> tags from content
+function stripThoughtTags(text: string): string {
+  if (!text) return text;
+  return text
+    .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
+    .replace(/<\/?thought>/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export const config = {
   runtime: 'edge',
 };
@@ -215,8 +225,8 @@ function relayStreamWithThoughtTransform(upstream: Response): Response {
                 continue;
               }
 
-              // Regular text content
-              const rawContent = delta.content ?? '';
+              // Regular text content - strip thought tags
+              const rawContent = stripThoughtTags(delta.content ?? '');
               if (rawContent) {
                 const contentChunk = {
                   ...chunk,
@@ -369,8 +379,8 @@ function reassembleSseToJson(sseText: string): any {
     } catch {}
   }
 
-  content = content.trim();
-  reasoningContent = reasoningContent.trim();
+  content = stripThoughtTags(content.trim());
+  reasoningContent = stripThoughtTags(reasoningContent.trim());
 
   if (hadToolCalls) finishReason = 'tool_calls';
 
