@@ -1,8 +1,7 @@
 {
   "version": 2,
   "routes": [
-    { "handle": "filesystem" },
-    { "src": "/v1/chat/completions", "methods": ["POST"], "dest": "/api/chat/completions.ts" },
-    { "src": "/(api|.*)", "methods": ["POST"], "dest": "/api/chat/completions.ts" }
+    { "src": "/v1/chat/completions", "dest": "/api/chat/completions" },
+    { "src": "/api/chat/completions", "dest": "/api/chat/completions" }
   ]
 }
