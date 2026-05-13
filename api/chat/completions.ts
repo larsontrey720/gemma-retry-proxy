@@ -19,8 +19,8 @@ export const config = {
   runtime: 'edge',
 };
 
-const MAX_RETRIES = 2;
-const INITIAL_RETRY_DELAY = 200;
+const MAX_RETRIES = 5;
+const INITIAL_RETRY_DELAY = 100;
 const HEARTBEAT_INTERVAL_MS = 3000;
 
 export default async function handler(req: Request) {
